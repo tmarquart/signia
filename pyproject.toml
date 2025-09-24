@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["signia*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[project]
+name = "signia"
+description = "Function Signature Tools"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.0.2"
+authors = [{ name = "Tim Marquart" }]

@@ -1,0 +1,9 @@
+__pycache__/
+*.egg
+*.egg-info/
+dist/
+build/
+.idea/*
+prototypes/excluded/*
+.env
+.venv
