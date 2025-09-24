@@ -18,7 +18,7 @@ __all__ = [
 
 
 class SignatureConflictError(ValueError):
-    """Raised when incompatible signatures are merged."""
+    """Raised when merging callables hits conflicting signature metadata."""
 
 
 def mirror_signature(target: Callable[..., Any], source: Callable[..., Any]) -> Callable[..., Any]:
