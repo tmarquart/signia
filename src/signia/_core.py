@@ -50,26 +50,117 @@ def mirror_signature(src: Callable[..., Any]) -> Callable[[Callable[..., Any]], 
 
 
 def same_signature(
-    first: Callable[..., Any],
-    second: Callable[..., Any],
+    first: Callable[..., Any] | Signature,
+    second: Callable[..., Any] | Signature,
     *,
-    check_parameter_annotations: bool = True,
-    check_return_annotation: bool = True,
+    strict: bool = True,
+    ignore_return: bool = False,
+    ignore_annotations: bool = False,
 ) -> bool:
-    """Return ``True`` when two callables share the same signature."""
+    """Compare two callables or :class:`inspect.Signature` objects.
 
-    signature_a = inspect.signature(first)
-    signature_b = inspect.signature(second)
+    The function defaults to a *strict* comparison, requiring parameters,
+    defaults, annotations, and the return annotation to match exactly.
+    Relaxed comparisons can be performed by setting ``strict=False`` (ignores
+    differences in default *values*, but not whether defaults exist),
+    ``ignore_return=True`` (ignores mismatched return annotations), and
+    ``ignore_annotations=True`` (ignores both parameter and return
+    annotations).
 
-    if not check_parameter_annotations:
+    Examples
+    --------
+    >>> def original(x: int, /, y: str, *, z: float = 1.0) -> str:
+    ...     return y * int(z)
+    >>> def mirror(x: int, /, y: str, *, z: float = 1.0) -> str:
+    ...     return original(x, y=y, z=z)
+    >>> same_signature(original, mirror)
+    True
+
+    ``strict=False`` tolerates different default *values* so long as optional
+    and required parameters align.
+
+    >>> def configurable(x: int, y: int = 0) -> int:
+    ...     return x + y
+    >>> def different_default(x: int, y: int = 1) -> int:
+    ...     return x + y
+    >>> same_signature(configurable, different_default)
+    False
+    >>> same_signature(configurable, different_default, strict=False)
+    True
+
+    Annotations can be ignored selectively.
+
+    >>> def annotated(x: int) -> int:
+    ...     return x
+    >>> def unannotated(x):
+    ...     return x
+    >>> same_signature(annotated, unannotated)
+    False
+    >>> same_signature(annotated, unannotated, ignore_annotations=True)
+    True
+
+    Return annotations may also be ignored while retaining strict parameter
+    comparisons.
+
+    >>> def returns_int(x: int) -> int:
+    ...     return x
+    >>> def returns_str(x: int) -> str:
+    ...     return str(x)
+    >>> same_signature(returns_int, returns_str)
+    False
+    >>> same_signature(returns_int, returns_str, ignore_return=True)
+    True
+    """
+
+    signature_a = _ensure_signature(first)
+    signature_b = _ensure_signature(second)
+
+    if ignore_annotations:
         signature_a = _strip_parameter_annotations(signature_a)
         signature_b = _strip_parameter_annotations(signature_b)
 
-    if not check_return_annotation:
+    if ignore_return or ignore_annotations:
         signature_a = signature_a.replace(return_annotation=Signature.empty)
         signature_b = signature_b.replace(return_annotation=Signature.empty)
 
-    return signature_a == signature_b
+    if strict:
+        return signature_a == signature_b
+
+    return _compatible_signatures(signature_a, signature_b)
+
+
+def _ensure_signature(target: Callable[..., Any] | Signature) -> Signature:
+    """Return a concrete :class:`inspect.Signature` for *target*."""
+
+    if isinstance(target, Signature):
+        return target
+    return inspect.signature(target)
+
+
+def _compatible_signatures(left: Signature, right: Signature) -> bool:
+    """Return ``True`` when two signatures are structurally compatible."""
+
+    parameters_left = list(left.parameters.values())
+    parameters_right = list(right.parameters.values())
+
+    if len(parameters_left) != len(parameters_right):
+        return False
+
+    for parameter_left, parameter_right in zip(parameters_left, parameters_right):
+        if parameter_left.kind is not parameter_right.kind:
+            return False
+        if parameter_left.name != parameter_right.name:
+            return False
+
+        has_default_left = parameter_left.default is not Parameter.empty
+        has_default_right = parameter_right.default is not Parameter.empty
+        if has_default_left != has_default_right:
+            return False
+
+        if parameter_left.annotation != parameter_right.annotation:
+            return False
+
+    return left.return_annotation == right.return_annotation
 
 
 def merge_signatures(*callables: Callable[..., Any]) -> Signature:
