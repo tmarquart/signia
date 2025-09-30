@@ -21,12 +21,32 @@ class SignatureConflictError(ValueError):
     """Raised when merging callables hits conflicting signature metadata."""
 
 
-def mirror_signature(target: Callable[..., Any], source: Callable[..., Any]) -> Callable[..., Any]:
-    """Mirror ``source``'s signature and metadata onto ``target``."""
+def mirror_signature(src: Callable[..., Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Mirror a callable's signature and metadata onto another.
 
-    update_wrapper(target, source)
-    target.__signature__ = inspect.signature(source)
-    return target
+    Example
+    -------
+    >>> def greet(name: str, excited: bool = False) -> str:
+    ...     return f"Hello {name}{'!' if excited else ''}"
+    >>> @mirror_signature(greet)
+    ... def wrapper(*args: Any, **kwargs: Any) -> str:
+    ...     return greet(*args, **kwargs)
+    >>> import inspect
+    >>> str(inspect.signature(wrapper))
+    "(name: str, excited: bool = False) -> str"
+    """
+
+    signature = inspect.signature(src)
+
+    def decorator(target: Callable[..., Any]) -> Callable[..., Any]:
+        update_wrapper(target, src)
+        target.__wrapped__ = src
+        target.__doc__ = src.__doc__
+        target.__name__ = src.__name__
+        target.__signature__ = signature
+        return target
+
+    return decorator
 
 
 def same_signature(
