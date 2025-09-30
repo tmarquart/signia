@@ -124,6 +124,10 @@ calls: list[str] = []
 wrapped = combine(load, audit)
 assert wrapped("demo.txt", logger=calls) == "DEMO.TXT"
 assert calls == ["load called"]
+
+# Inspect what each callable received
+assert load.vars.args == ("demo.txt",)
+assert audit.vars.kwargs == {"logger": calls}
 ```
 
 ``combine`` uses ``merge_signatures`` under the hood so that a single callable can
