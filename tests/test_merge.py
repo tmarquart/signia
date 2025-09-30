@@ -128,3 +128,34 @@ def test_merge_signatures_prefer_annotated():
 def test_merge_signatures_requires_input():
     with pytest.raises(ValueError):
         merge_signatures()
+
+
+def test_merge_signatures_with_base_method():
+    class BaseClass:
+        def method(self, value: int, *, flag: bool = False) -> int:
+            return value if flag else -value
+
+    def helper(*, audit: list[str]) -> None:
+        audit.append("helper-called")
+
+    signature = merge_signatures(BaseClass.method, helper)
+
+    parameters = list(signature.parameters.values())
+    assert [parameter.name for parameter in parameters] == [
+        "self",
+        "value",
+        "flag",
+        "audit",
+    ]
+    assert parameters[0].kind is Parameter.POSITIONAL_OR_KEYWORD
+    assert parameters[1].kind is Parameter.POSITIONAL_OR_KEYWORD
+    assert parameters[2].kind is Parameter.KEYWORD_ONLY
+    assert parameters[3].kind is Parameter.KEYWORD_ONLY
+
+    audit: list[str] = []
+    bound = signature.bind(BaseClass(), 10, flag=True, audit=audit)
+
+    assert bound.arguments["self"].__class__ is BaseClass
+    assert bound.arguments["value"] == 10
+    assert bound.arguments["flag"] is True
+    assert bound.arguments["audit"] is audit
