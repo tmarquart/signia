@@ -107,10 +107,12 @@ def test_combine_exposes_call_vars():
     assert primary.vars.args == (1, 2)
     assert primary.vars.kwargs == {"flag": True}
     assert list(primary.vars.arguments.items()) == [("x", 1), ("y", 2), ("flag", True)]
+    assert primary.vars.result == 3
 
     assert audit.vars.args == ()
     assert audit.vars.kwargs == {"flag": True, "tracker": tracker}
     assert list(audit.vars.arguments.items()) == [("flag", True), ("tracker", tracker)]
+    assert audit.vars.result is None
 
     # Call again to ensure the snapshots refresh rather than accumulate.
     tracker.clear()
@@ -120,3 +122,31 @@ def test_combine_exposes_call_vars():
     assert primary.vars.args == (5, 10)
     assert primary.vars.kwargs == {"flag": False}
     assert list(primary.vars.arguments.items())[-1] == ("flag", False)
+    assert primary.vars.result == 15
+
+
+def test_combine_custom_wrapper_allows_manual_result():
+    def func_a(a: int, b: int) -> int:
+        return a + b
+
+    def func_b(*, scale: int = 1) -> int:
+        return scale
+
+    calls: list[tuple[int, int]] = []
+
+    @combine(func_a, func_b)
+    def wrapper(a: int, b: int, *, scale: int = 1) -> int:
+        calls.append((func_a.vars.result, func_b.vars.result))
+        return func_a.vars.result * func_b.vars.result
+
+    assert inspect.signature(wrapper) == merge_signatures(func_a, func_b)
+
+    result = wrapper(2, 3, scale=5)
+
+    assert result == (2 + 3) * 5
+    assert calls == [(5, 5)]
+
+    second = wrapper(4, 6)
+
+    assert second == (4 + 6) * 1
+    assert calls[-1] == (10, 1)
