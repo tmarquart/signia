@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from functools import update_wrapper
+from functools import update_wrapper, wraps
 import inspect
 from inspect import Parameter, Signature
 from typing import Any, Callable
@@ -294,40 +294,129 @@ def combine(
     name: str | None = None,
     doc: str | None = None,
 ) -> Callable[..., Any]:
-    """Combine multiple callables into a wrapper with a merged signature."""
+    """Combine callables while routing keyword arguments to later functions.
+
+    Parameters
+    ----------
+    *functions:
+        Callables to combine.  The first callable supplies the public interface
+        and its return value becomes the wrapper's result, while later callables
+        receive any keyword arguments it does not accept.
+    name:
+        Optional override for the resulting wrapper's ``__name__`` and
+        ``__qualname__``.
+    doc:
+        Optional override for the resulting wrapper's ``__doc__``.
+
+    Examples
+    --------
+    Keyword-only arguments can be routed to helper functions while the primary
+    callable keeps a clean signature.
+
+    >>> def load(path: str, *, encoding: str = "utf-8") -> str:
+    ...     return path.upper()
+    >>> def audit(*, logger: list[str]) -> None:
+    ...     logger.append("load called")
+    >>> calls: list[str] = []
+    >>> wrapped = combine(load, audit)
+    >>> wrapped("demo.txt", logger=calls)
+    'DEMO.TXT'
+    >>> calls
+    ['load called']
+
+    ``combine`` works for methods as well, keeping ``self`` handling intact
+    while forwarding extra keyword arguments to supporting hooks.
+
+    >>> class Greeter:
+    ...     def greet(self, name: str) -> str:
+    ...         return f"Hello {name}!"
+    ...
+    ...     def log(self, *, history: list[str]) -> None:
+    ...         history.append("greeted")
+    ...
+    ...     call = combine(greet, log)
+    >>> history: list[str] = []
+    >>> Greeter().call("Ada", history=history)
+    'Hello Ada!'
+    >>> history
+    ['greeted']
+    """
 
     if not functions:
         raise ValueError("combine requires at least one callable")
 
     merged_signature = merge_signatures(*functions)
+    primary, *secondary = functions
+    signatures = [inspect.signature(function) for function in functions]
 
+    def _has_var_keyword(signature: Signature) -> bool:
+        return any(parameter.kind is Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+
+    def _drop_unknown_kwargs(
+        signature: Signature, incoming: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not incoming:
+            return {}, {}
+        if _has_var_keyword(signature):
+            return dict(incoming), {}
+
+        accepted = {
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+        }
+        known = {name: incoming[name] for name in incoming if name in accepted}
+        leftover = {name: value for name, value in incoming.items() if name not in accepted}
+        return known, leftover
+
+    def _bind_arguments(signature: Signature, values: OrderedDict[str, Any], extra_kwargs: dict[str, Any]) -> inspect.BoundArguments:
+        positional: list[Any] = []
+        keywords: dict[str, Any] = dict(extra_kwargs)
+
+        for parameter in signature.parameters.values():
+            if parameter.kind is Parameter.POSITIONAL_ONLY:
+                if parameter.name in values:
+                    positional.append(values[parameter.name])
+            elif parameter.kind is Parameter.POSITIONAL_OR_KEYWORD:
+                if parameter.name in values and parameter.name not in keywords:
+                    positional.append(values[parameter.name])
+            elif parameter.kind is Parameter.VAR_POSITIONAL:
+                positional.extend(values.get(parameter.name, ()))
+            elif parameter.kind is Parameter.KEYWORD_ONLY:
+                if parameter.name in values and parameter.name not in keywords:
+                    keywords[parameter.name] = values[parameter.name]
+            elif parameter.kind is Parameter.VAR_KEYWORD:
+                remainder = dict(values.get(parameter.name, {}))
+                remainder.update(keywords)
+                keywords = remainder
+
+        return signature.bind_partial(*positional, **keywords)
+
+    @wraps(primary)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        bound = merged_signature.bind(*args, **kwargs)
-        bound.apply_defaults()
+        bound_all = merged_signature.bind(*args, **kwargs)
+        bound_all.apply_defaults()
+        arguments = bound_all.arguments
 
-        results = []
-        for function in functions:
-            function_signature = inspect.signature(function)
-            positional: list[Any] = []
-            keywords: dict[str, Any] = {}
+        remaining_kwargs = dict(kwargs)
+        known, remaining_kwargs = _drop_unknown_kwargs(signatures[0], remaining_kwargs)
+        bound_primary = _bind_arguments(signatures[0], arguments, known)
+        result = primary(*bound_primary.args, **bound_primary.kwargs)
 
-            for parameter in function_signature.parameters.values():
-                if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD):
-                    positional.append(bound.arguments[parameter.name])
-                elif parameter.kind is Parameter.VAR_POSITIONAL:
-                    positional.extend(bound.arguments.get(parameter.name, ()))
-                elif parameter.kind is Parameter.KEYWORD_ONLY:
-                    keywords[parameter.name] = bound.arguments[parameter.name]
-                elif parameter.kind is Parameter.VAR_KEYWORD:
-                    keywords.update(bound.arguments.get(parameter.name, {}))
+        for function, signature in zip(secondary, signatures[1:]):
+            known, remaining_kwargs = _drop_unknown_kwargs(signature, remaining_kwargs)
+            bound = _bind_arguments(signature, arguments, known)
+            function(*bound.args, **bound.kwargs)
 
-            results.append(function(*positional, **keywords))
+        if remaining_kwargs:
+            unexpected = next(iter(remaining_kwargs))
+            function_name = name or primary.__name__
+            raise TypeError(
+                f"{function_name}() got an unexpected keyword argument '{unexpected}'"
+            )
 
-        if len(results) == 1:
-            return results[0]
-        return tuple(results)
+        return result
 
-    update_wrapper(wrapper, functions[-1])
     wrapper.__signature__ = merged_signature
 
     if name:
