@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 from functools import update_wrapper, wraps
 import inspect
 from inspect import Parameter, Signature
 from typing import Any, Callable
 
 __all__ = [
+    "CallVars",
     "SignatureConflictError",
     "combine",
     "merge_signatures",
@@ -32,6 +34,20 @@ ConflictResolver = Callable[[str, Parameter, Parameter, tuple[ConflictDetail, ..
 
 class SignatureConflictError(ValueError):
     """Raised when merging callables hits conflicting signature metadata."""
+
+
+@dataclass(frozen=True)
+class CallVars:
+    """Capture the bound arguments supplied to a callable."""
+
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    arguments: OrderedDict[str, Any]
+
+    def __iter__(self):
+        """Iterate over ``(name, value)`` items for convenience."""
+
+        return iter(self.arguments.items())
 
 
 def mirror_signature(src: Callable[..., Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -308,6 +324,11 @@ def combine(
     doc:
         Optional override for the resulting wrapper's ``__doc__``.
 
+    On every invocation the bound arguments routed to each callable are stored on
+    the original function object using a ``vars`` attribute.  The value is a
+    :class:`CallVars` snapshot containing ``args``, ``kwargs``, and an ordered
+    mapping of ``arguments`` mirroring :class:`inspect.BoundArguments`.
+
     Examples
     --------
     Keyword-only arguments can be routed to helper functions while the primary
@@ -392,6 +413,11 @@ def combine(
 
         return signature.bind_partial(*positional, **keywords)
 
+    def _set_call_vars(function: Callable[..., Any], bound: inspect.BoundArguments) -> None:
+        ordered = OrderedDict(bound.arguments.items())
+        vars_snapshot = CallVars(args=bound.args, kwargs=dict(bound.kwargs), arguments=ordered)
+        setattr(function, "vars", vars_snapshot)
+
     @wraps(primary)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         bound_all = merged_signature.bind(*args, **kwargs)
@@ -401,11 +427,13 @@ def combine(
         remaining_kwargs = dict(kwargs)
         known, remaining_kwargs = _drop_unknown_kwargs(signatures[0], remaining_kwargs)
         bound_primary = _bind_arguments(signatures[0], arguments, known)
+        _set_call_vars(primary, bound_primary)
         result = primary(*bound_primary.args, **bound_primary.kwargs)
 
         for function, signature in zip(secondary, signatures[1:]):
             known, remaining_kwargs = _drop_unknown_kwargs(signature, remaining_kwargs)
             bound = _bind_arguments(signature, arguments, known)
+            _set_call_vars(function, bound)
             function(*bound.args, **bound.kwargs)
 
         if remaining_kwargs:

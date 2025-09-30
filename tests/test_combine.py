@@ -84,3 +84,39 @@ def test_combine_method_behavior():
 
     assert result == 5
     assert tool.history == ["action:5:True", "log:done"]
+
+
+def test_combine_exposes_call_vars():
+    calls: list[str] = []
+
+    def primary(x: int, y: int = 2, /, *, flag: bool = False) -> int:
+        calls.append(f"primary:{flag}")
+        return x + y
+
+    def audit(*, flag: bool, tracker: list[str]) -> None:
+        tracker.append(f"audit:{flag}")
+
+    tracker: list[str] = []
+    wrapped = combine(primary, audit)
+
+    assert not hasattr(primary, "vars")
+    result = wrapped(1, flag=True, tracker=tracker)
+
+    assert result == 3
+    assert tracker == ["audit:True"]
+    assert primary.vars.args == (1, 2)
+    assert primary.vars.kwargs == {"flag": True}
+    assert list(primary.vars.arguments.items()) == [("x", 1), ("y", 2), ("flag", True)]
+
+    assert audit.vars.args == ()
+    assert audit.vars.kwargs == {"flag": True, "tracker": tracker}
+    assert list(audit.vars.arguments.items()) == [("flag", True), ("tracker", tracker)]
+
+    # Call again to ensure the snapshots refresh rather than accumulate.
+    tracker.clear()
+    wrapped(5, 10, tracker=tracker)
+
+    assert tracker == ["audit:False"]
+    assert primary.vars.args == (5, 10)
+    assert primary.vars.kwargs == {"flag": False}
+    assert list(primary.vars.arguments.items())[-1] == ("flag", False)

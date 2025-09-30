@@ -1,6 +1,7 @@
 """Public Signia API."""
 
 from ._core import (
+    CallVars,
     SignatureConflictError,
     combine,
     merge_signatures,
@@ -9,6 +10,7 @@ from ._core import (
 )
 
 __all__ = [
+    "CallVars",
     "SignatureConflictError",
     "combine",
     "merge_signatures",
