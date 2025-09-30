@@ -43,6 +43,7 @@ class CallVars:
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     arguments: OrderedDict[str, Any]
+    result: Any
 
     def __iter__(self):
         """Iterate over ``(name, value)`` items for convenience."""
@@ -413,47 +414,124 @@ def combine(
 
         return signature.bind_partial(*positional, **keywords)
 
-    def _set_call_vars(function: Callable[..., Any], bound: inspect.BoundArguments) -> None:
+    def _set_call_vars(
+        function: Callable[..., Any], bound: inspect.BoundArguments, result: Any
+    ) -> None:
         ordered = OrderedDict(bound.arguments.items())
-        vars_snapshot = CallVars(args=bound.args, kwargs=dict(bound.kwargs), arguments=ordered)
+        vars_snapshot = CallVars(
+            args=bound.args,
+            kwargs=dict(bound.kwargs),
+            arguments=ordered,
+            result=result,
+        )
         setattr(function, "vars", vars_snapshot)
 
-    @wraps(primary)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        bound_all = merged_signature.bind(*args, **kwargs)
-        bound_all.apply_defaults()
-        arguments = bound_all.arguments
+    def _build_wrapper(
+        custom_wrapper: Callable[..., Any] | None,
+    ) -> Callable[..., Any]:
+        template = custom_wrapper or primary
 
-        remaining_kwargs = dict(kwargs)
-        known, remaining_kwargs = _drop_unknown_kwargs(signatures[0], remaining_kwargs)
-        bound_primary = _bind_arguments(signatures[0], arguments, known)
-        _set_call_vars(primary, bound_primary)
-        result = primary(*bound_primary.args, **bound_primary.kwargs)
+        @wraps(template)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound_all = merged_signature.bind(*args, **kwargs)
+            bound_all.apply_defaults()
+            arguments = bound_all.arguments
 
-        for function, signature in zip(secondary, signatures[1:]):
-            known, remaining_kwargs = _drop_unknown_kwargs(signature, remaining_kwargs)
-            bound = _bind_arguments(signature, arguments, known)
-            _set_call_vars(function, bound)
-            function(*bound.args, **bound.kwargs)
+            remaining_kwargs = dict(kwargs)
+            known, remaining_kwargs = _drop_unknown_kwargs(signatures[0], remaining_kwargs)
+            bound_primary = _bind_arguments(signatures[0], arguments, known)
+            result = primary(*bound_primary.args, **bound_primary.kwargs)
+            _set_call_vars(primary, bound_primary, result)
 
-        if remaining_kwargs:
-            unexpected = next(iter(remaining_kwargs))
-            function_name = name or primary.__name__
-            raise TypeError(
-                f"{function_name}() got an unexpected keyword argument '{unexpected}'"
-            )
+            for function, signature in zip(secondary, signatures[1:]):
+                known, remaining_kwargs = _drop_unknown_kwargs(signature, remaining_kwargs)
+                bound = _bind_arguments(signature, arguments, known)
+                outcome = function(*bound.args, **bound.kwargs)
+                _set_call_vars(function, bound, outcome)
 
-        return result
+            if remaining_kwargs:
+                unexpected = next(iter(remaining_kwargs))
+                function_name = name or primary.__name__
+                raise TypeError(
+                    f"{function_name}() got an unexpected keyword argument '{unexpected}'"
+                )
 
-    wrapper.__signature__ = merged_signature
+            if custom_wrapper is not None:
+                call_args = bound_all.args
+                call_kwargs = dict(bound_all.kwargs)
+                return custom_wrapper(*call_args, **call_kwargs)
 
-    if name:
-        wrapper.__name__ = name
-        wrapper.__qualname__ = name
-    if doc is not None:
-        wrapper.__doc__ = doc
+            return result
 
-    return wrapper
+        wrapper.__signature__ = merged_signature
+
+        if name:
+            wrapper.__name__ = name
+            wrapper.__qualname__ = name
+        if doc is not None:
+            wrapper.__doc__ = doc
+
+        return wrapper
+
+    class _CombinedCallable:
+        def __init__(self, builder: Callable[[Callable[..., Any] | None], Callable[..., Any]]):
+            self._builder = builder
+            self._callable: Callable[..., Any] | None = None
+            self._allow_configuration = True
+            self.__signature__ = merged_signature
+            template = primary
+            self.__module__ = template.__module__
+            self.__name__ = name or template.__name__
+            self.__qualname__ = name or template.__qualname__
+            self.__doc__ = doc if doc is not None else template.__doc__
+            self.__annotations__ = getattr(template, "__annotations__", {}).copy()
+
+        def _apply_metadata(self) -> None:
+            if self._callable is None:
+                return
+            update_wrapper(self, self._callable)
+            if name:
+                self.__name__ = name
+                self.__qualname__ = name
+            if doc is not None:
+                self.__doc__ = doc
+
+        def _ensure_callable(self) -> None:
+            if self._callable is None:
+                self._callable = self._builder(None)
+                self._allow_configuration = False
+                self._apply_metadata()
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            if (
+                self._allow_configuration
+                and len(args) == 1
+                and not kwargs
+                and inspect.isfunction(args[0])
+            ):
+                frame = inspect.currentframe()
+                if frame is not None:
+                    caller = frame.f_back
+                    in_locals = caller.f_locals.get(args[0].__name__) is args[0]
+                else:
+                    in_locals = True
+
+                if not in_locals and not args[0].__name__.startswith("<"):
+                    self._callable = self._builder(args[0])
+                    self._allow_configuration = False
+                    self._apply_metadata()
+                    return self
+
+            self._ensure_callable()
+            return self._callable(*args, **kwargs)
+
+        def __get__(self, instance: Any, owner: Any) -> Any:
+            self._ensure_callable()
+            return self._callable.__get__(instance, owner)
+
+    combined = _CombinedCallable(_build_wrapper)
+    combined._apply_metadata()
+    return combined
 
 
 def _strip_parameter_annotations(signature: Signature) -> Signature:
