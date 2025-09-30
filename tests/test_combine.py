@@ -150,3 +150,30 @@ def test_combine_custom_wrapper_allows_manual_result():
 
     assert second == (4 + 6) * 1
     assert calls[-1] == (10, 1)
+
+
+def test_combine_subclass_override():
+    class Base:
+        def __init__(self) -> None:
+            self.base_calls: list[tuple[int, bool]] = []
+
+        def method(self, value: int, /, *, flag: bool = False) -> str:
+            self.base_calls.append((value, flag))
+            return f"base:{value}:{flag}"
+
+    def subclass_helper(*, note: str, audit: list[str]) -> None:
+        audit.append(note)
+
+    class Sub(Base):
+        def __init__(self) -> None:
+            super().__init__()
+            self.audit: list[str] = []
+
+        method = combine(Base.method, subclass_helper)
+
+    instance = Sub()
+    result = instance.method(5, flag=True, note="called", audit=instance.audit)
+
+    assert result == "base:5:True"
+    assert instance.base_calls == [(5, True)]
+    assert instance.audit == ["called"]
