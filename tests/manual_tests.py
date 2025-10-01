@@ -33,12 +33,27 @@ def ext_func(new_input=0,*args,**kwargs):
     print(func_a(func_a.vars.unpack()))
     print(new_input)
 
-@sg.fuse(func_a,func_b)
+#Legacy - works
+@sg.combine(func_a,func_b)
 def wrapper(*args,**kwargs):
-    print(func_a(func_a.vars.unpack()))
-    print(func_b(func_b.vars.unpack()))
+    print(func_a(**func_a.vars.unpack()))
+    print(func_b(**func_b.vars.unpack()))
+
+@sg.fuse(func_a,func_b)
+def wrapper_fuse(*args,**kwargs):
+    print(func_a(**func_a.vars.unpack()))
+    print(func_b(**func_b.vars.unpack()))
+
+def typed_func(a:int = 3, b:int = 4):
+    """this is a doc string"""
+
+    return a+b
+
+@sg.fuse(typed_func)
+def copy_function(*args,**kwargs):
+    pass
 
 if __name__=='__main__':
-    wrapper(1,2,3,4,5,6)
+    wrapper_fuse(1,2,3,4,5,6)
     cl=StandardClass()
     cl.wrapper(1,2,3,4,5,6)
