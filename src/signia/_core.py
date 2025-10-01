@@ -669,7 +669,23 @@ def fuse(
                 proxy = proxy_cache.get(index)
                 if proxy is None:
                     proxy = build_proxy(index, arguments, origins)
+
+                    info = metadata[index]
+                    bound = info.signature.bind(*proxy.args, **dict(proxy.kw))
+                    ordered = OrderedDict(bound.arguments.items())
+                    snapshot = CallVars(
+                        args=bound.args,
+                        kwargs=dict(bound.kwargs),
+                        arguments=ordered,
+                        result=_CACHE_MISS,
+                    )
+                    proxy._cache_vars = snapshot
+                    proxy._assign_call_vars(snapshot)
+
                     proxy_cache[index] = proxy
+                else:
+                    if proxy._cache_vars is not None:
+                        proxy._assign_call_vars(proxy._cache_vars)
                 return proxy
 
             proxies = [get_proxy(index) for index in range(len(metadata))]
