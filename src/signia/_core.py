@@ -50,6 +50,18 @@ class CallVars:
 
         return iter(self.arguments.items())
 
+    def unpack(self) -> OrderedDict[str, Any]:
+        """Return a shallow copy of the bound argument mapping.
+
+        The :attr:`arguments` attribute already exposes an ordered mapping of
+        parameter names to their supplied values.  ``unpack()`` mirrors that
+        data but as an explicit convenience API, allowing call sites to write
+        ``func.vars.unpack()`` when they want a mapping such as
+        ``{"a": 1, "b": 2, "c": 3}``.
+        """
+
+        return self.arguments.copy()
+
 
 def mirror_signature(src: Callable[..., Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mirror a callable's signature and metadata onto another.
