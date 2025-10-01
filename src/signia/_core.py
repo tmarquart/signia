@@ -15,16 +15,11 @@ __all__ = [
     "CallVars",
     "SigniaWarning",
     "SignatureConflictError",
-    "SigniaWarning",
     "combine",
     "merge_signatures",
     "mirror_signature",
     "same_signature",
 ]
-
-
-class SigniaWarning(UserWarning):
-    """Base warning for Signia-specific warnings."""
 
 
 _CACHE_MISS = object()
@@ -144,8 +139,8 @@ class SignatureConflictError(ValueError):
     """Raised when merging callables hits conflicting signature metadata."""
 
 
-class SigniaWarning(Warning):
-    """Base warning class for the Signia package."""
+class SigniaWarning(UserWarning):
+    """Base warning for Signia-specific warnings."""
 
 
 @dataclass(frozen=True)
