@@ -107,11 +107,13 @@ def test_combine_exposes_call_vars():
     assert primary.vars.args == (1, 2)
     assert primary.vars.kwargs == {"flag": True}
     assert list(primary.vars.arguments.items()) == [("x", 1), ("y", 2), ("flag", True)]
+    assert list(primary.vars.unpack().items()) == [("x", 1), ("y", 2), ("flag", True)]
     assert primary.vars.result == 3
 
     assert audit.vars.args == ()
     assert audit.vars.kwargs == {"flag": True, "tracker": tracker}
     assert list(audit.vars.arguments.items()) == [("flag", True), ("tracker", tracker)]
+    assert list(audit.vars.unpack().items()) == [("flag", True), ("tracker", tracker)]
     assert audit.vars.result is None
 
     # Call again to ensure the snapshots refresh rather than accumulate.
@@ -122,6 +124,9 @@ def test_combine_exposes_call_vars():
     assert primary.vars.args == (5, 10)
     assert primary.vars.kwargs == {"flag": False}
     assert list(primary.vars.arguments.items())[-1] == ("flag", False)
+    unpacked = primary.vars.unpack()
+    unpacked["flag"] = True
+    assert primary.vars.arguments["flag"] is False
     assert primary.vars.result == 15
 
 
