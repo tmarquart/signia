@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 __all__ = [
     "CallVars",
+    "SigniaWarning",
     "SignatureConflictError",
     "combine",
     "merge_signatures",
@@ -34,6 +35,10 @@ ConflictResolver = Callable[[str, Parameter, Parameter, tuple[ConflictDetail, ..
 
 class SignatureConflictError(ValueError):
     """Raised when merging callables hits conflicting signature metadata."""
+
+
+class SigniaWarning(Warning):
+    """Base warning class for the Signia package."""
 
 
 @dataclass(frozen=True)

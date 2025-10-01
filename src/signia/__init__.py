@@ -2,6 +2,7 @@
 
 from ._core import (
     CallVars,
+    SigniaWarning,
     SignatureConflictError,
     combine,
     merge_signatures,
@@ -11,6 +12,7 @@ from ._core import (
 
 __all__ = [
     "CallVars",
+    "SigniaWarning",
     "SignatureConflictError",
     "combine",
     "merge_signatures",
