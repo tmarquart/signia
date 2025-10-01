@@ -10,7 +10,7 @@ class StandardClass(object):
 
     @sg.fuse(func_a,func_b)
     def wrapper(*args,**kwargs):
-        pass
+        print('called cl.wrapper')
 
 class BaseClass(object):
     def __init__(self):
@@ -21,12 +21,12 @@ class BaseClass(object):
 class ChildClass(BaseClass):
     @sg.fuse(BaseClass.base_func)
     def child_func(self,*args,**kwargs):
-        return a*b+c
+        print("Called child_func")
 
 @sg.fuse(ChildClass.child_func,func_b)
 def top_function(*args,**kwargs):
-    print(a+b+c)
-    print(func_b(func_b.vars.unpack()))
+    print (top_function.__signature__)
+    print(func_b(**func_b.vars.unpack()))
 
 @sg.fuse(func_a)
 def ext_func(new_input=0,*args,**kwargs):
@@ -57,3 +57,7 @@ if __name__=='__main__':
     wrapper_fuse(1,2,3,4,5,6)
     cl=StandardClass()
     cl.wrapper(1,2,3,4,5,6)
+    ch=ChildClass()
+    ch.child_func(1,2,3)
+    #top_function(1,2,3,4,5,6,7) #this is taking a self parameter, needs to not do that, its a regular function
+    #ext_func(new_input=2,a=1,b=2,c=3)
