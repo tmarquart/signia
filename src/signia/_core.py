@@ -7,16 +7,123 @@ from dataclasses import dataclass
 from functools import update_wrapper, wraps
 import inspect
 from inspect import Parameter, Signature
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
+import warnings
 
 __all__ = [
     "CallVars",
     "SignatureConflictError",
+    "SigniaWarning",
     "combine",
     "merge_signatures",
     "mirror_signature",
     "same_signature",
 ]
+
+
+class SigniaWarning(UserWarning):
+    """Base warning for Signia-specific warnings."""
+
+
+_CACHE_MISS = object()
+
+
+class _FusedSourceProxy:
+    """Proxy exposing signature metadata for fused callables."""
+
+    __slots__ = (
+        "_callable",
+        "_signature",
+        "_args",
+        "_kwargs",
+        "_defaults",
+        "_cache",
+    )
+
+    def __init__(self, function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
+        self._callable = function
+        self._signature = inspect.signature(function)
+        bound = self._signature.bind(*args, **kwargs)
+        self._args = bound.args
+        self._kwargs = dict(bound.kwargs)
+        self._defaults = {
+            name: parameter.default
+            for name, parameter in self._signature.parameters.items()
+            if parameter.default is not Parameter.empty
+        }
+        self._cache: Any = _CACHE_MISS
+
+    @property
+    def args(self) -> tuple[Any, ...]:
+        """Return the positional arguments captured from the original call."""
+
+        return self._args
+
+    @property
+    def kw(self) -> Mapping[str, Any]:
+        """Return a read-only mapping of the original keyword arguments."""
+
+        return MappingProxyType(self._kwargs)
+
+    @property
+    def signature(self) -> Signature:
+        """Expose the stored :class:`inspect.Signature`."""
+
+        return self._signature
+
+    @property
+    def params(self) -> OrderedDict[str, Parameter]:
+        """Return the parameters for the stored signature."""
+
+        return self._signature.parameters
+
+    @property
+    def defaults(self) -> dict[str, Any]:
+        """Return a mapping of parameter names to their default values."""
+
+        return dict(self._defaults)
+
+    def _bound_call(self) -> Any:
+        """Invoke the stored callable using the captured binding."""
+
+        return self._callable(*self._args, **self._kwargs)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Call the underlying function, optionally overriding arguments."""
+
+        if not args and not kwargs:
+            if self._cache is _CACHE_MISS:
+                self._cache = self._bound_call()
+            return self._cache
+
+        bound = self._signature.bind(*self._args, **self._kwargs)
+        if args or kwargs:
+            overrides = self._signature.bind_partial(*args, **kwargs)
+            for name, value in overrides.arguments.items():
+                bound.arguments[name] = value
+
+        missing: list[str] = []
+        for name, parameter in self._signature.parameters.items():
+            if parameter.default is not Parameter.empty:
+                continue
+            if parameter.kind in (Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD):
+                continue
+            if name not in bound.arguments:
+                missing.append(name)
+
+        if missing:
+            dropped = ", ".join(missing)
+            warnings.warn(
+                f"dropped extras for required parameters: {dropped}",
+                SigniaWarning,
+                stacklevel=2,
+            )
+
+        return self._callable(*bound.args, **bound.kwargs)
+
+    def __repr__(self) -> str:
+        return f"<_FusedSourceProxy {self._callable!r}>"
 
 
 _PARAMETER_KIND_ORDER = (
