@@ -8,7 +8,7 @@ from functools import update_wrapper, wraps
 import inspect
 from inspect import Parameter, Signature
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import warnings
 
 __all__ = [
@@ -173,6 +173,197 @@ class CallVars:
         """
 
         return self.arguments.copy()
+
+
+def _describe_source(target: Callable[..., Any] | Signature) -> str:
+    """Return a human-readable description of *target* for error messages."""
+
+    if isinstance(target, Signature):
+        return str(target)
+    if hasattr(target, "__qualname__"):
+        return target.__qualname__  # type: ignore[return-value]
+    if hasattr(target, "__name__"):
+        return target.__name__  # type: ignore[return-value]
+    return repr(target)
+
+
+def _merge_fuse_signatures(
+    sources: Sequence[Callable[..., Any] | Signature],
+    *,
+    on_conflict: str | ConflictResolver | None = "error",
+    compare_defaults: bool = True,
+    compare_annotations: bool = True,
+) -> tuple[Signature, dict[str, int], bool, bool]:
+    """Merge *sources* while tracking metadata needed for fused wrappers."""
+
+    if not sources:
+        raise ValueError("_merge_fuse_signatures requires at least one source")
+
+    signatures = [_ensure_signature(source) for source in sources]
+    source_names = [_describe_source(source) for source in sources]
+
+    occurrence_sources: dict[str, list[int]] = {}
+    parameter_lookup: dict[int, tuple[str, int]] = {}
+    source_parameter_lookup: dict[tuple[int, str], Parameter] = {}
+
+    for index, signature in enumerate(signatures):
+        for parameter in signature.parameters.values():
+            occurrences = occurrence_sources.setdefault(parameter.name, [])
+            occurrence_index = len(occurrences)
+            occurrences.append(index)
+            parameter_lookup[id(parameter)] = (parameter.name, occurrence_index)
+            source_parameter_lookup[(index, parameter.name)] = parameter
+
+    def _source_name(index: int) -> str:
+        try:
+            return source_names[index]
+        except IndexError:  # pragma: no cover - defensive
+            return f"source[{index}]"
+
+    def _lookup_parameter(index: int, name: str) -> Parameter:
+        return source_parameter_lookup[(index, name)]
+
+    def _owner_index(name: str, occurrence_index: int | None, policy: str) -> int:
+        indices = occurrence_sources[name]
+        if policy == "prefer-last":
+            if occurrence_index is None:
+                return indices[-1]
+            if occurrence_index == 0:
+                return indices[0]
+            return indices[occurrence_index - 1]
+        return indices[0]
+
+    def _incoming_index(name: str, occurrence_index: int | None, policy: str) -> int:
+        indices = occurrence_sources[name]
+        if occurrence_index is None:
+            return indices[-1] if policy == "prefer-last" else indices[0]
+        return indices[occurrence_index]
+
+    policy: str
+    resolver: ConflictResolver | None
+
+    if on_conflict is None:
+        on_conflict = "error"
+
+    if on_conflict == "error":
+        duplicates = [
+            (name, [source_names[index] for index in indices])
+            for name, indices in occurrence_sources.items()
+            if len(indices) > 1
+        ]
+        if duplicates:
+            name, owners = duplicates[0]
+            owners_display = ", ".join(owners)
+            raise SignatureConflictError(
+                f"parameter name collision for '{name}': {owners_display}"
+            )
+        policy = "prefer-first"
+        resolver = None
+    elif on_conflict == "left":
+        policy = "prefer-first"
+
+        def resolver(name: str, existing: Parameter, incoming: Parameter, conflicts: tuple[ConflictDetail, ...]) -> Parameter:
+            incoming_info = parameter_lookup.get(id(incoming))
+            occurrence_index = incoming_info[1] if incoming_info is not None else None
+            owner_index = _owner_index(name, occurrence_index, policy)
+            incoming_index = _incoming_index(name, occurrence_index, policy)
+            owner_name = _source_name(owner_index)
+            incoming_name = _source_name(incoming_index)
+
+            for conflict_type, _, _ in conflicts:
+                if conflict_type == "default" and compare_defaults:
+                    owner_parameter = _lookup_parameter(owner_index, name)
+                    incoming_parameter = _lookup_parameter(incoming_index, name)
+                    raise SignatureConflictError(
+                        f"default mismatch for parameter '{name}': "
+                        f"{owner_name}={owner_parameter.default!r}, "
+                        f"{incoming_name}={incoming_parameter.default!r}"
+                    )
+                if conflict_type == "annotation" and compare_annotations:
+                    owner_parameter = _lookup_parameter(owner_index, name)
+                    incoming_parameter = _lookup_parameter(incoming_index, name)
+                    raise SignatureConflictError(
+                        f"annotation mismatch for parameter '{name}': "
+                        f"{owner_name}={owner_parameter.annotation!r}, "
+                        f"{incoming_name}={incoming_parameter.annotation!r}"
+                    )
+
+            return existing
+
+    elif on_conflict == "right":
+        policy = "prefer-last"
+
+        def resolver(name: str, existing: Parameter, incoming: Parameter, conflicts: tuple[ConflictDetail, ...]) -> Parameter:
+            incoming_info = parameter_lookup.get(id(incoming))
+            occurrence_index = incoming_info[1] if incoming_info is not None else None
+            owner_index = _owner_index(name, occurrence_index, policy)
+            incoming_index = _incoming_index(name, occurrence_index, policy)
+            owner_name = _source_name(owner_index)
+            incoming_name = _source_name(incoming_index)
+
+            for conflict_type, _, _ in conflicts:
+                if conflict_type == "default" and compare_defaults:
+                    owner_parameter = _lookup_parameter(owner_index, name)
+                    incoming_parameter = _lookup_parameter(incoming_index, name)
+                    raise SignatureConflictError(
+                        f"default mismatch for parameter '{name}': "
+                        f"{owner_name}={owner_parameter.default!r}, "
+                        f"{incoming_name}={incoming_parameter.default!r}"
+                    )
+                if conflict_type == "annotation" and compare_annotations:
+                    owner_parameter = _lookup_parameter(owner_index, name)
+                    incoming_parameter = _lookup_parameter(incoming_index, name)
+                    raise SignatureConflictError(
+                        f"annotation mismatch for parameter '{name}': "
+                        f"{owner_name}={owner_parameter.annotation!r}, "
+                        f"{incoming_name}={incoming_parameter.annotation!r}"
+                    )
+
+            return incoming
+
+    elif callable(on_conflict):
+        policy = "prefer-first"
+        resolver = on_conflict
+    else:
+        raise ValueError(
+            "on_conflict must be 'error', 'left', 'right', or a callable for _merge_fuse_signatures"
+        )
+
+    merged_signature = merge_signatures(
+        *signatures,
+        policy=policy,
+        on_conflict=resolver,
+        compare_defaults=compare_defaults,
+        compare_annotations=compare_annotations,
+    )
+
+    owners: dict[str, int] = {}
+    has_varargs = False
+    has_varkw = False
+
+    for parameter in merged_signature.parameters.values():
+        if parameter.kind is Parameter.VAR_POSITIONAL:
+            has_varargs = True
+        elif parameter.kind is Parameter.VAR_KEYWORD:
+            has_varkw = True
+
+        indices = occurrence_sources.get(parameter.name)
+        if not indices:
+            continue
+
+        owner_index: int | None = None
+        for candidate_index in indices:
+            candidate = source_parameter_lookup.get((candidate_index, parameter.name))
+            if candidate is not None and candidate == parameter:
+                owner_index = candidate_index
+                break
+
+        if owner_index is None:
+            owner_index = indices[-1] if policy == "prefer-last" else indices[0]
+
+        owners[parameter.name] = owner_index
+
+    return merged_signature, owners, has_varargs, has_varkw
 
 
 def mirror_signature(src: Callable[..., Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
