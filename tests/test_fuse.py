@@ -1,3 +1,4 @@
+
 """Tests for the fused source proxy helpers."""
 
 from __future__ import annotations
@@ -48,3 +49,12 @@ def test_proxy_defaults_and_signature_snapshot():
     assert proxy.signature == inspect.signature(sample)
     assert list(proxy.params) == ["a", "b", "c", "d"]
     assert proxy.defaults == {"b": 2, "c": 3}
+
+from signia import SigniaWarning
+
+
+def test_signia_warning_is_warning():
+    """Ensure the exported warning derives from :class:`Warning`."""
+
+    assert issubclass(SigniaWarning, Warning)
+
