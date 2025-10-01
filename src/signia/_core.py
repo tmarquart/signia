@@ -19,6 +19,7 @@ __all__ = [
     "merge_signatures",
     "mirror_signature",
     "same_signature",
+    "fuse",
 ]
 
 
@@ -359,6 +360,295 @@ def _merge_fuse_signatures(
         owners[parameter.name] = owner_index
 
     return merged_signature, owners, has_varargs, has_varkw
+
+
+@dataclass(frozen=True)
+class _FusedSourceMetadata:
+    """Metadata captured for each source fed into :func:`fuse`."""
+
+    function: Callable[..., Any]
+    signature: Signature
+    name: str
+    is_bound_method: bool
+    has_varargs: bool
+    has_varkw: bool
+
+
+_VALID_PUBLISH_MODES = {"auto", "function", "method", "classmethod", "staticmethod"}
+
+
+def _detect_publish_mode(
+    wrapper: Callable[..., Any], publish: str, signature: Signature
+) -> tuple[str, str | None]:
+    """Return the effective publish mode and context parameter name."""
+
+    if publish != "auto":
+        mode = publish
+    else:
+        qualname = getattr(wrapper, "__qualname__", "")
+        first_positional: Parameter | None = None
+        for parameter in signature.parameters.values():
+            if parameter.kind in (
+                Parameter.POSITIONAL_ONLY,
+                Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                first_positional = parameter
+                break
+
+        parts = [segment for segment in qualname.split(".") if segment]
+        parent: str | None = None
+        for candidate in reversed(parts[:-1]):
+            if candidate != "<locals>":
+                parent = candidate
+                break
+
+        if parent is None:
+            mode = "function"
+        else:
+            if first_positional and first_positional.name == "cls":
+                mode = "classmethod"
+            elif first_positional and first_positional.name == "self":
+                mode = "method"
+            else:
+                mode = "staticmethod"
+
+    context_parameter: str | None
+    if mode == "method":
+        context_parameter = "self"
+    elif mode == "classmethod":
+        context_parameter = "cls"
+    else:
+        context_parameter = None
+
+    return mode, context_parameter
+
+
+def fuse(
+    *sources: Callable[..., Any],
+    publish: str = "auto",
+    on_conflict: str | ConflictResolver | None = "error",
+    compare_defaults: bool = True,
+    compare_annotations: bool = True,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate *wrapper* with fused access to *sources*."""
+
+    if not sources:
+        raise ValueError("fuse requires at least one source callable")
+
+    if publish not in _VALID_PUBLISH_MODES:
+        raise ValueError(
+            "publish must be one of {'auto', 'function', 'method', 'classmethod', 'staticmethod'}"
+        )
+
+    if not (
+        callable(on_conflict)
+        or on_conflict in {"error", "left", "right", None}
+    ):
+        raise ValueError(
+            "on_conflict must be 'error', 'left', 'right', a callable, or None"
+        )
+
+    metadata: list[_FusedSourceMetadata] = []
+    for source in sources:
+        if not callable(source):
+            raise TypeError("fuse sources must be callable")
+
+        signature = inspect.signature(source)
+        is_bound = inspect.ismethod(source) and getattr(source, "__self__", None) is not None
+        if is_bound:
+            warnings.warn(
+                f"fuse source {source!r} appears to be a bound method; pass the unbound function instead",
+                SigniaWarning,
+                stacklevel=2,
+            )
+
+        metadata.append(
+            _FusedSourceMetadata(
+                function=source,
+                signature=signature,
+                name=_describe_source(source),
+                is_bound_method=is_bound,
+                has_varargs=any(
+                    parameter.kind is Parameter.VAR_POSITIONAL
+                    for parameter in signature.parameters.values()
+                ),
+                has_varkw=any(
+                    parameter.kind is Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                ),
+            )
+        )
+
+    merged_signature, _, _, _ = _merge_fuse_signatures(
+        [item.signature for item in metadata],
+        on_conflict=on_conflict,
+        compare_defaults=compare_defaults,
+        compare_annotations=compare_annotations,
+    )
+
+    vararg_sources = sum(1 for item in metadata if item.has_varargs)
+    merged_vararg_count = sum(
+        1
+        for parameter in merged_signature.parameters.values()
+        if parameter.kind is Parameter.VAR_POSITIONAL
+    )
+    if vararg_sources > 1 and merged_vararg_count < vararg_sources:
+        warnings.warn(
+            "multiple sources supplied *args parameters; merged signature collapses them",
+            SigniaWarning,
+            stacklevel=2,
+        )
+
+    varkw_sources = sum(1 for item in metadata if item.has_varkw)
+    merged_varkw_count = sum(
+        1
+        for parameter in merged_signature.parameters.values()
+        if parameter.kind is Parameter.VAR_KEYWORD
+    )
+    if varkw_sources > 1 and merged_varkw_count < varkw_sources:
+        warnings.warn(
+            "multiple sources supplied **kwargs parameters; merged signature collapses them",
+            SigniaWarning,
+            stacklevel=2,
+        )
+
+    def decorator(wrapper: Callable[..., Any]) -> Callable[..., Any]:
+        wrapper_signature = inspect.signature(wrapper)
+        mode, context_parameter = _detect_publish_mode(
+            wrapper, publish, wrapper_signature
+        )
+
+        wrapper_parameters = list(wrapper_signature.parameters.values())
+
+        declared_context = False
+        if context_parameter:
+            if wrapper_parameters and wrapper_parameters[0].name == context_parameter:
+                declared_context = True
+
+        positional_capacity = 0
+        vararg_available = False
+        parameters_to_scan = wrapper_parameters[1:] if declared_context else wrapper_parameters
+        for parameter in parameters_to_scan:
+            if parameter.kind in (
+                Parameter.POSITIONAL_ONLY,
+                Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                positional_capacity += 1
+            elif parameter.kind is Parameter.VAR_POSITIONAL:
+                vararg_available = True
+                break
+            else:
+                break
+
+        if not vararg_available and positional_capacity < len(metadata):
+            raise TypeError(
+                "fuse wrapper must accept positional parameters for each source proxy"
+            )
+
+        public_parameters = list(merged_signature.parameters.values())
+        if context_parameter:
+            if not public_parameters or public_parameters[0].name != context_parameter:
+                context = Parameter(
+                    context_parameter,
+                    kind=Parameter.POSITIONAL_OR_KEYWORD,
+                )
+                public_parameters.insert(0, context)
+        public_signature = merged_signature.replace(parameters=public_parameters)
+
+        code = getattr(wrapper, "__code__", None)
+        co_varnames: tuple[str, ...] = getattr(code, "co_varnames", ()) if code else ()
+        co_names: tuple[str, ...] = getattr(code, "co_names", ()) if code else ()
+        if mode == "method" and not declared_context:
+            warnings.warn(
+                "fuse published wrapper as method but no 'self' parameter was declared",
+                SigniaWarning,
+                stacklevel=2,
+            )
+        if mode == "classmethod" and not declared_context:
+            warnings.warn(
+                "fuse published wrapper as classmethod but no 'cls' parameter was declared",
+                SigniaWarning,
+                stacklevel=2,
+            )
+        if mode == "staticmethod" and (
+            "self" in co_varnames or "self" in co_names or "cls" in co_varnames
+        ):
+            warnings.warn(
+                "fuse published wrapper as staticmethod but wrapper references 'self'/'cls'",
+                SigniaWarning,
+                stacklevel=2,
+            )
+
+        def build_proxy(
+            index: int,
+            arguments: Mapping[str, Any],
+            origins: Mapping[str, str],
+        ) -> _FusedSourceProxy:
+            info = metadata[index]
+            args: list[Any] = []
+            kwargs: dict[str, Any] = {}
+            for parameter in info.signature.parameters.values():
+                name = parameter.name
+                if parameter.kind is Parameter.POSITIONAL_ONLY:
+                    args.append(arguments[name])
+                elif parameter.kind is Parameter.POSITIONAL_OR_KEYWORD:
+                    origin = origins.get(name)
+                    if origin == "keyword":
+                        kwargs[name] = arguments[name]
+                    else:
+                        args.append(arguments[name])
+                elif parameter.kind is Parameter.VAR_POSITIONAL:
+                    args.extend(arguments.get(name, ()))
+                elif parameter.kind is Parameter.KEYWORD_ONLY:
+                    kwargs[name] = arguments[name]
+                elif parameter.kind is Parameter.VAR_KEYWORD:
+                    kwargs.update(arguments.get(name, {}))
+            return _FusedSourceProxy(info.function, *args, **kwargs)
+
+        def fused(*call_args: Any, **call_kwargs: Any) -> Any:
+            bound = public_signature.bind(*call_args, **call_kwargs)
+            provided_arguments = OrderedDict(bound.arguments)
+            bound.apply_defaults()
+            arguments = OrderedDict(bound.arguments)
+
+            origins: dict[str, str] = {}
+            for name in arguments:
+                if name in provided_arguments:
+                    if name in call_kwargs:
+                        origins[name] = "keyword"
+                    else:
+                        origins[name] = "positional"
+                else:
+                    origins[name] = "default"
+
+            proxy_cache: dict[int, _FusedSourceProxy] = {}
+
+            def get_proxy(index: int) -> _FusedSourceProxy:
+                proxy = proxy_cache.get(index)
+                if proxy is None:
+                    proxy = build_proxy(index, arguments, origins)
+                    proxy_cache[index] = proxy
+                return proxy
+
+            proxies = [get_proxy(index) for index in range(len(metadata))]
+
+            call_values: list[Any] = []
+            if context_parameter and declared_context:
+                call_values.append(arguments[context_parameter])
+            call_values.extend(proxies)
+
+            return wrapper(*call_values)
+
+        update_wrapper(fused, wrapper)
+        fused.__signature__ = public_signature
+
+        if mode == "classmethod":
+            return classmethod(fused)
+        if mode == "staticmethod":
+            return staticmethod(fused)
+        return fused
+
+    return decorator
 
 
 def mirror_signature(src: Callable[..., Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
