@@ -148,6 +148,33 @@ def test_fuse_wrapper_proxy_memoization():
     assert calls == [3]
 
 
+def test_fuse_wrapper_additional_keyword_parameter():
+    call_log: list[tuple[tuple[int, ...], dict[str, int]]] = []
+    captured: list[int] = []
+
+    def source(value: int) -> int:
+        call_log.append(((value,), {}))
+        return value
+
+    @fuse(source)
+    def ext(proxy, *, new_input: int = 0):
+        captured.append(new_input)
+        return proxy() + new_input
+
+    signature = inspect.signature(ext)
+    params = list(signature.parameters.values())
+
+    assert [param.name for param in params] == ["value", "new_input"]
+    assert params[1].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params[1].default == 0
+
+    result = ext(5, new_input=7)
+
+    assert result == 12
+    assert captured == [7]
+    assert call_log == [((5,), {})]
+
+
 def test_fuse_proxy_call_vars_function_mode():
     calls: list[tuple[int, int]] = []
     snapshots: list[CallVars] = []

@@ -567,20 +567,28 @@ def fuse(
             if wrapper_parameters and wrapper_parameters[0].name == context_parameter:
                 declared_context = True
 
+        start_index = 1 if declared_context else 0
         positional_capacity = 0
         vararg_available = False
-        parameters_to_scan = wrapper_parameters[1:] if declared_context else wrapper_parameters
-        for parameter in parameters_to_scan:
+        proxy_parameters_end = start_index
+        remaining_sources = len(metadata)
+        for parameter in wrapper_parameters[start_index:]:
             if parameter.kind in (
                 Parameter.POSITIONAL_ONLY,
                 Parameter.POSITIONAL_OR_KEYWORD,
             ):
                 positional_capacity += 1
-            elif parameter.kind is Parameter.VAR_POSITIONAL:
+                if remaining_sources > 0:
+                    proxy_parameters_end += 1
+                    remaining_sources -= 1
+                continue
+            if parameter.kind is Parameter.VAR_POSITIONAL:
                 vararg_available = True
+                if remaining_sources > 0:
+                    proxy_parameters_end += 1
+                    remaining_sources = 0
                 break
-            else:
-                break
+            break
 
         if not vararg_available and positional_capacity < len(metadata):
             raise TypeError(
@@ -595,6 +603,41 @@ def fuse(
                     kind=Parameter.POSITIONAL_OR_KEYWORD,
                 )
                 public_parameters.insert(0, context)
+
+        existing_names = {parameter.name for parameter in public_parameters}
+        has_var_positional = any(
+            parameter.kind is Parameter.VAR_POSITIONAL for parameter in public_parameters
+        )
+        has_var_keyword = any(
+            parameter.kind is Parameter.VAR_KEYWORD for parameter in public_parameters
+        )
+
+        wrapper_only_parameters: list[Parameter] = []
+
+        def insert_parameter(targets: list[Parameter], parameter: Parameter) -> None:
+            order = _PARAMETER_KIND_ORDER.index(parameter.kind)
+            for index, existing in enumerate(targets):
+                if _PARAMETER_KIND_ORDER.index(existing.kind) > order:
+                    targets.insert(index, parameter)
+                    break
+            else:
+                targets.append(parameter)
+
+        for parameter in wrapper_parameters[proxy_parameters_end:]:
+            if parameter.name in existing_names:
+                continue
+            if parameter.kind is Parameter.VAR_POSITIONAL and has_var_positional:
+                continue
+            if parameter.kind is Parameter.VAR_KEYWORD and has_var_keyword:
+                continue
+            insert_parameter(public_parameters, parameter)
+            existing_names.add(parameter.name)
+            if parameter.kind is Parameter.VAR_POSITIONAL:
+                has_var_positional = True
+            if parameter.kind is Parameter.VAR_KEYWORD:
+                has_var_keyword = True
+            wrapper_only_parameters.append(parameter)
+
         public_signature = merged_signature.replace(parameters=public_parameters)
 
         code = getattr(wrapper, "__code__", None)
@@ -653,6 +696,28 @@ def fuse(
             bound.apply_defaults()
             arguments = OrderedDict(bound.arguments)
 
+            wrapper_positional_args: list[Any] = []
+            wrapper_keyword_args: dict[str, Any] = {}
+
+            for parameter in wrapper_only_parameters:
+                name = parameter.name
+                if parameter.kind is Parameter.POSITIONAL_ONLY:
+                    value = arguments.pop(name)
+                    wrapper_positional_args.append(value)
+                elif parameter.kind is Parameter.POSITIONAL_OR_KEYWORD:
+                    value = arguments.pop(name)
+                    wrapper_positional_args.append(value)
+                elif parameter.kind is Parameter.VAR_POSITIONAL:
+                    value = arguments.pop(name, ())
+                    wrapper_positional_args.extend(value)
+                elif parameter.kind is Parameter.KEYWORD_ONLY:
+                    value = arguments.pop(name)
+                    wrapper_keyword_args[name] = value
+                elif parameter.kind is Parameter.VAR_KEYWORD:
+                    value = arguments.pop(name, {})
+                    wrapper_keyword_args.update(value)
+                provided_arguments.pop(name, None)
+
             origins: dict[str, str] = {}
             for name in arguments:
                 if name in provided_arguments:
@@ -694,8 +759,9 @@ def fuse(
             if context_parameter and declared_context:
                 call_values.append(arguments[context_parameter])
             call_values.extend(proxies)
+            call_values.extend(wrapper_positional_args)
 
-            return wrapper(*call_values)
+            return wrapper(*call_values, **wrapper_keyword_args)
 
         update_wrapper(fused, wrapper)
         fused.__signature__ = public_signature
