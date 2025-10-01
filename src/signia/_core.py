@@ -36,6 +36,8 @@ class _FusedSourceProxy:
         "_kwargs",
         "_defaults",
         "_cache",
+        "_cache_vars",
+        "_vars_targets",
     )
 
     def __init__(self, function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
@@ -50,6 +52,12 @@ class _FusedSourceProxy:
             if parameter.default is not Parameter.empty
         }
         self._cache: Any = _CACHE_MISS
+        self._cache_vars: CallVars | None = None
+        targets: list[Any] = [self._callable]
+        function_target = getattr(function, "__func__", None)
+        if function_target is not None and function_target is not function:
+            targets.append(function_target)
+        self._vars_targets = tuple(targets)
 
     @property
     def args(self) -> tuple[Any, ...]:
@@ -86,12 +94,44 @@ class _FusedSourceProxy:
 
         return self._callable(*self._args, **self._kwargs)
 
+    def _assign_call_vars(self, snapshot: CallVars) -> None:
+        for target in self._vars_targets:
+            try:
+                setattr(target, "vars", snapshot)
+            except (AttributeError, TypeError):
+                continue
+
+    def _capture_call_vars(
+        self, bound: inspect.BoundArguments, result: Any
+    ) -> CallVars:
+        ordered = OrderedDict(bound.arguments.items())
+        snapshot = CallVars(
+            args=bound.args,
+            kwargs=dict(bound.kwargs),
+            arguments=ordered,
+            result=result,
+        )
+        self._assign_call_vars(snapshot)
+        return snapshot
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Call the underlying function, optionally overriding arguments."""
 
         if not args and not kwargs:
             if self._cache is _CACHE_MISS:
-                self._cache = self._bound_call()
+                bound = self._signature.bind(*self._args, **self._kwargs)
+                result = self._callable(*bound.args, **bound.kwargs)
+                snapshot = self._capture_call_vars(bound, result)
+                self._cache = result
+                self._cache_vars = snapshot
+                return result
+
+            if self._cache_vars is None:
+                bound = self._signature.bind(*self._args, **self._kwargs)
+                self._cache_vars = self._capture_call_vars(bound, self._cache)
+
+            snapshot = self._cache_vars
+            self._assign_call_vars(snapshot)
             return self._cache
 
         bound = self._signature.bind(*self._args, **self._kwargs)
@@ -117,7 +157,9 @@ class _FusedSourceProxy:
                 stacklevel=2,
             )
 
-        return self._callable(*bound.args, **bound.kwargs)
+        result = self._callable(*bound.args, **bound.kwargs)
+        self._capture_call_vars(bound, result)
+        return result
 
     def __repr__(self) -> str:
         return f"<_FusedSourceProxy {self._callable!r}>"

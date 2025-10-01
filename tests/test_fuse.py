@@ -8,7 +8,7 @@ import inspect
 import pytest
 
 from signia import SigniaWarning, fuse
-from signia._core import _FusedSourceProxy
+from signia._core import CallVars, _FusedSourceProxy
 
 
 def test_proxy_memoizes_zero_arg_calls():
@@ -146,6 +146,134 @@ def test_fuse_wrapper_proxy_memoization():
 
     assert repeat(3) == 12
     assert calls == [3]
+
+
+def test_fuse_proxy_call_vars_function_mode():
+    calls: list[tuple[int, int]] = []
+    snapshots: list[CallVars] = []
+
+    def multiply(value: int, *, factor: int = 1) -> int:
+        calls.append((value, factor))
+        return value * factor
+
+    @fuse(multiply)
+    def wrapper(proxy):
+        first = proxy()
+        snapshots.append(multiply.vars)
+        second = proxy()
+        snapshots.append(multiply.vars)
+        third = proxy(factor=3)
+        snapshots.append(multiply.vars)
+        return first + second + third
+
+    assert wrapper(4) == (4 * 1) + (4 * 1) + (4 * 3)
+    assert calls == [(4, 1), (4, 3)]
+
+    cached_first, cached_second, override_vars = snapshots
+    assert cached_first.args == (4,)
+    assert cached_first.kwargs == {"factor": 1}
+    assert list(cached_first.arguments.items()) == [
+        ("value", 4),
+        ("factor", 1),
+    ]
+    assert cached_first.result == 4
+    assert cached_second is cached_first
+
+    assert override_vars.args == (4,)
+    assert override_vars.kwargs == {"factor": 3}
+    assert list(override_vars.arguments.items()) == [
+        ("value", 4),
+        ("factor", 3),
+    ]
+    assert override_vars.result == 12
+    assert multiply.vars is override_vars
+
+
+def test_fuse_proxy_call_vars_method_mode():
+    history: list[tuple[int, str]] = []
+    snapshots: list[CallVars] = []
+
+    class Greeter:
+        def format(self, value: int, *, suffix: str = "!") -> str:
+            history.append((value, suffix))
+            return f"{value}{suffix}"
+
+        @fuse(format, publish="method")
+        def emit(self, proxy):
+            first = proxy()
+            snapshots.append(Greeter.format.vars)
+            second = proxy()
+            snapshots.append(Greeter.format.vars)
+            third = proxy(suffix="?")
+            snapshots.append(Greeter.format.vars)
+            return first + second + third
+
+    greeter = Greeter()
+    assert greeter.emit(2) == "2!2!2?"
+    assert history == [(2, "!"), (2, "?")]
+
+    cached_first, cached_second, override_vars = snapshots
+    assert cached_first.args == (greeter, 2)
+    assert cached_first.kwargs == {"suffix": "!"}
+    assert list(cached_first.arguments.items()) == [
+        ("self", greeter),
+        ("value", 2),
+        ("suffix", "!"),
+    ]
+    assert cached_first.result == "2!"
+    assert cached_second is cached_first
+
+    assert override_vars.args == (greeter, 2)
+    assert override_vars.kwargs == {"suffix": "?"}
+    assert list(override_vars.arguments.items()) == [
+        ("self", greeter),
+        ("value", 2),
+        ("suffix", "?"),
+    ]
+    assert override_vars.result == "2?"
+    assert Greeter.format.vars is override_vars
+
+
+def test_fuse_proxy_call_vars_staticmethod_mode():
+    calls: list[tuple[int, int]] = []
+    snapshots: list[CallVars] = []
+
+    def adjust(value: int, *, offset: int = 0) -> int:
+        calls.append((value, offset))
+        return value + offset
+
+    class Calculator:
+        @fuse(adjust, publish="staticmethod")
+        def process(proxy):
+            first = proxy()
+            snapshots.append(adjust.vars)
+            second = proxy()
+            snapshots.append(adjust.vars)
+            third = proxy(offset=5)
+            snapshots.append(adjust.vars)
+            return first + second + third
+
+    assert Calculator.process(3) == (3 + 0) + (3 + 0) + (3 + 5)
+    assert calls == [(3, 0), (3, 5)]
+
+    cached_first, cached_second, override_vars = snapshots
+    assert cached_first.args == (3,)
+    assert cached_first.kwargs == {"offset": 0}
+    assert list(cached_first.arguments.items()) == [
+        ("value", 3),
+        ("offset", 0),
+    ]
+    assert cached_first.result == 3
+    assert cached_second is cached_first
+
+    assert override_vars.args == (3,)
+    assert override_vars.kwargs == {"offset": 5}
+    assert list(override_vars.arguments.items()) == [
+        ("value", 3),
+        ("offset", 5),
+    ]
+    assert override_vars.result == 8
+    assert adjust.vars is override_vars
 
 
 def test_fuse_bound_method_warning():
