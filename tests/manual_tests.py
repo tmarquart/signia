@@ -23,6 +23,12 @@ class ChildClass(BaseClass):
     def child_func(self,*args,**kwargs):
         print("Called child_func")
 
+class OtherClass(object):
+    def __init__(self):
+        pass
+    def other_base_func(self):
+        pass
+
 @sg.fuse(ChildClass.child_func,func_b)
 def top_function(*args,**kwargs):
     print (top_function.__signature__)

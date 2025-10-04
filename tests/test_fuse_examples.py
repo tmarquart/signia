@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 
-from signia import fuse
+from src.signia._core import fuse
+#from signia import fuse
 
 
 # --- shared specs used across entrypoints ---
@@ -223,3 +224,17 @@ def test_new_delta_reuses_base_spec_defaults():
             "enable_cache": False,
         },
     }
+
+def test_chain():
+    run_teradata(host="db.example.com",
+        user="alice",
+        password="secret",
+        database="analytics",
+        query_text="SELECT 42",
+        enable_cache=True,
+        tmode="TERA",)
+    print(run_teradata.__signature__)
+
+if __name__=='__main__':
+    test_chain()
+    run_teradata()
